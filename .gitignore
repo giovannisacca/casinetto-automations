@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 output/
+downloads_temp/
 *.xlsx
 *.pdf
 venv/
