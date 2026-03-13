@@ -1,0 +1,34 @@
+name: Daily Shopify War Room Report
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Every day at 6:00 AM UTC
+  workflow_dispatch:      # Allow manual runs
+
+jobs:
+  run-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Shopify report script
+        env:
+          SHOPIFY_TOKEN: ${{ secrets.SHOPIFY_TOKEN }}
+        run: python shopify_war_room_report.py
+
+      - name: Upload CSV as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: war-room-daily-report
+          path: war_room_daily_*.csv
+          retention-days: 30
