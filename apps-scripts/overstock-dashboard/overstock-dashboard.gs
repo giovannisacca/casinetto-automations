@@ -36,6 +36,7 @@ var HEADERS = {
   SUPPLIER        : 'supplier name',
   SOH             : 'sellable on hand',
   ORDER_INTERVAL  : 'order interval',
+  ITEM_COST       : 'item cost',
   OVERSTOCK_VALUE : 'overstock value based on item cost (soh+ in transit)>120 days',
   OVERSTOCK_QTY   : 'overstock qty (considering soh + in transit)qty>120 days',
 };
@@ -91,8 +92,8 @@ function runDashboard() {
     var baselineSheet = _getTabByDate(src, CFG.BASELINE_DATE);
 
     // ── Read today's filtered rows ────────────────────────────────────────────
-    var todayIdx   = _columnIndices(todaySheet);
-    var todayRows  = _filteredRows(todaySheet, todayIdx);
+    var todayColInfo = _columnIndices(todaySheet);
+    var todayRows    = _filteredRows(todaySheet, todayColInfo);
     var todayAED   = _sum(todayRows, 'overstockValue');
     var todayUnits = _sum(todayRows, 'overstockQty');
     var skuCount   = todayRows.length;
@@ -110,8 +111,8 @@ function runDashboard() {
     yesterday.setDate(yesterday.getDate() - 1);
     var ydayResult = _findMostRecentTab(src, yesterday);
     var ydaySheet  = ydayResult.sheet;
-    var ydayIdx    = ydaySheet ? _columnIndices(ydaySheet) : {};
-    var ydayRows   = ydaySheet ? _filteredRows(ydaySheet, ydayIdx) : [];
+    var ydayColInfo = ydaySheet ? _columnIndices(ydaySheet) : { idx: {}, headerRow: 1 };
+    var ydayRows    = ydaySheet ? _filteredRows(ydaySheet, ydayColInfo) : [];
     var ydayAED    = _sum(ydayRows, 'overstockValue');
     var ydayUnits  = _sum(ydayRows, 'overstockQty');
 
@@ -122,8 +123,8 @@ function runDashboard() {
     // ── Baseline AED ──────────────────────────────────────────────────────────
     var baselineAED = 0;
     if (baselineSheet) {
-      var bIdx  = _columnIndices(baselineSheet);
-      var bRows = _filteredRows(baselineSheet, bIdx);
+      var bColInfo = _columnIndices(baselineSheet);
+      var bRows    = _filteredRows(baselineSheet, bColInfo);
       baselineAED = _sum(bRows, 'overstockValue');
     }
 
@@ -255,19 +256,53 @@ function _norm(s) {
 }
 
 /**
- * Reads row 1 of a sheet and returns a map of normalised-header → 0-based column index.
+ * Scans the first 5 rows of a sheet to find the row that contains BOTH
+ * "Item Code" AND "Order Interval". Tabs have a merged group-label row
+ * above the real header row, so we cannot assume row 1 is the header.
+ *
+ * Returns the 1-based row number of the best match.
+ * Falls back to the row with the most non-empty cells if sentinels aren't found.
+ */
+function _findHeaderRow(sheet) {
+  var maxScan = Math.min(5, sheet.getLastRow());
+  if (maxScan < 1) return 1;
+
+  var rows = sheet.getRange(1, 1, maxScan, sheet.getLastColumn()).getValues();
+  var sentinels = [_norm(HEADERS.ITEM_CODE), _norm(HEADERS.ORDER_INTERVAL)];
+
+  for (var r = 0; r < rows.length; r++) {
+    var normed = rows[r].map(function(h) { return _norm(h); });
+    var hits   = sentinels.filter(function(s) { return normed.indexOf(s) >= 0; }).length;
+    if (hits === sentinels.length) return r + 1;  // 1-based
+  }
+
+  // Fallback: use the row with the most non-empty header cells
+  var best = 0, bestRow = 1;
+  for (var r = 0; r < rows.length; r++) {
+    var count = rows[r].filter(function(h) { return _norm(h) !== ''; }).length;
+    if (count > best) { best = count; bestRow = r + 1; }
+  }
+  return bestRow;
+}
+
+/**
+ * Finds the header row and builds a column-index map.
+ * Returns { idx, headerRow } where:
+ *   idx       — map of normalised-header → 0-based column index
+ *   headerRow — 1-based row number where headers were found
  */
 function _columnIndices(sheet) {
-  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var headerRow = _findHeaderRow(sheet);
+  var headers   = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn()).getValues()[0];
   var idx = {};
   headers.forEach(function(h, i) {
     var key = _norm(h);
     if (key) idx[key] = i;
   });
-  return idx;
+  return { idx: idx, headerRow: headerRow };
 }
 
-/** Looks up a column index by header name (normalised). Returns -1 if not found. */
+/** Looks up a 0-based column index by header name (normalised). Returns -1 if not found. */
 function _col(idx, headerConstant) {
   var key = _norm(headerConstant);
   return (key in idx) ? idx[key] : -1;
@@ -278,15 +313,21 @@ function _col(idx, headerConstant) {
 /**
  * Reads all data rows from a sheet and returns only those where
  * Order Interval = "Christmas/Easter".
+ *
+ * @param {Sheet}  sheet    — the source sheet
+ * @param {Object} colInfo  — { idx, headerRow } returned by _columnIndices()
+ *
  * Each returned object: { itemCode, description, supplier, soh, overstockValue, overstockQty }
  */
-function _filteredRows(sheet, idx) {
+function _filteredRows(sheet, colInfo) {
   try {
+    var idx       = colInfo.idx       || {};
+    var headerRow = colInfo.headerRow || 1;
+    var dataStart = headerRow + 1;    // first data row (1-based)
+
     var lastRow = sheet.getLastRow();
     var lastCol = sheet.getLastColumn();
-    if (lastRow < 2 || lastCol < 1) return [];
-
-    var data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    if (lastRow < dataStart || lastCol < 1) return [];
 
     var oiCol  = _col(idx, HEADERS.ORDER_INTERVAL);
     var ovvCol = _col(idx, HEADERS.OVERSTOCK_VALUE);
@@ -295,6 +336,35 @@ function _filteredRows(sheet, idx) {
     var dCol   = _col(idx, HEADERS.DESCRIPTION);
     var sCol   = _col(idx, HEADERS.SUPPLIER);
     var sohCol = _col(idx, HEADERS.SOH);
+    var icostCol = _col(idx, HEADERS.ITEM_COST);
+
+    // ── Diagnostic log for every tab processed ───────────────────────────────
+    console.info(
+      '[Overstock Dashboard] Tab "' + sheet.getName() + '": ' +
+      'header row=' + headerRow + ', ' +
+      'Order Interval col=' + (oiCol  >= 0 ? oiCol  + 1 : 'NOT FOUND') + ' (idx ' + oiCol  + '), ' +
+      'Item cost col='      + (icostCol >= 0 ? icostCol + 1 : 'NOT FOUND') + ' (idx ' + icostCol + '), ' +
+      'Overstock AED col='  + (ovvCol >= 0 ? ovvCol + 1 : 'NOT FOUND') + ' (idx ' + ovvCol + '), ' +
+      'Overstock Qty col='  + (ovqCol >= 0 ? ovqCol + 1 : 'NOT FOUND') + ' (idx ' + ovqCol + ')'
+    );
+
+    var data = sheet.getRange(dataStart, 1, lastRow - headerRow, lastCol).getValues();
+
+    // ── Log first 3 Order Interval raw values (catches hidden spaces / alt spellings) ──
+    if (oiCol >= 0) {
+      var samples = data.slice(0, 3).map(function(row) {
+        return JSON.stringify(String(row[oiCol]));
+      });
+      console.info(
+        '[Overstock Dashboard] Tab "' + sheet.getName() + '" first 3 Order Interval values: ' +
+        samples.join(', ')
+      );
+    } else {
+      console.warn(
+        '[Overstock Dashboard] Tab "' + sheet.getName() + '": Order Interval column NOT FOUND — ' +
+        'available headers: ' + Object.keys(idx).slice(0, 20).join(', ')
+      );
+    }
 
     var filterNorm = _norm(CFG.FILTER_VALUE);
 
@@ -345,10 +415,10 @@ function _trailing7(src, todayDate) {
   var deltas = [];
   for (var i = 0; i < tabs.length - 1; i++) {
     try {
-      var nIdx = _columnIndices(tabs[i].sheet);
-      var oIdx = _columnIndices(tabs[i + 1].sheet);
-      var nAED = _sum(_filteredRows(tabs[i].sheet, nIdx), 'overstockValue');
-      var oAED = _sum(_filteredRows(tabs[i + 1].sheet, oIdx), 'overstockValue');
+      var nColInfo = _columnIndices(tabs[i].sheet);
+      var oColInfo = _columnIndices(tabs[i + 1].sheet);
+      var nAED = _sum(_filteredRows(tabs[i].sheet, nColInfo), 'overstockValue');
+      var oAED = _sum(_filteredRows(tabs[i + 1].sheet, oColInfo), 'overstockValue');
       deltas.push({ date: tabs[i].date, cleared: oAED - nAED });
     } catch (e) {
       console.warn('[Overstock Dashboard] _trailing7: skipping ' +
