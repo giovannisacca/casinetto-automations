@@ -1,3 +1,8 @@
+# TODO (2026-04-24): verify MEASURES dict against Cube.dev schema when endpoint
+# is accessible. Run GET /cubejs-api/v1/meta or the list_cubes MCP tool
+# (server: https://casinetto.staging.cibos.dev/api/mcp) to confirm all
+# cube and measure names below before using in production.
+
 """
 wbr_pull.py — Weekly Business Review data pull from Cube.dev staging.
 
